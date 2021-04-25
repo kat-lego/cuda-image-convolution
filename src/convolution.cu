@@ -24,38 +24,35 @@ __global__ void cuda_convolution_tc(image_t output, dim_t width, dim_t height);
 /**
 * a serial implementation of 2d convolution
 */
-void serial_convolution(image_t input, image_t kernel, image_t output, dim_t& width, dim_t& height, dim_t& k_dim, performance_t& p){
+void serial_convolution(image_t input, image_t filter, image_t output, dim_t& width, dim_t& height, dim_t& filter_dim, performance_t& p){
     cudaTime_t time;
     time.start_time();
     
-    for(int i=0; i<height; i++){
-        for(int j=0; j<width; j++){
+    for(int row=0; row<height; row++){
+        for(int col=0; col<width; col++){
                     
             pixel_t p = 0;
-            int radius = k_dim/2;
-            int r,c, rk, ck;
+            int r,c, r1, c1;
 
-            for(int a=0; a<k_dim;a++){
-                for(int b=0; b<k_dim; b++){
-                    r = i+a-radius;
-                    c = j+b-radius;
-                    
-                    rk = k_dim-a-1;
-                    ck = k_dim-b-1;
-                    
+            for(int i=0;i<filter_dim; i++){
+                for(int j =0; j<filter_dim; j++){
+        
+                    r = row+i-filter_dim/2; c = col+j-filter_dim/2;
+                    r1 = filter_dim-i-1; c1 = filter_dim-j-1;
                     if(r>=0 && r<height && c>=0 && c<width){
-                        p += kernel[rk*k_dim + ck]*input[r*width+c];
+                        p += filter[r1*filter_dim+c1]*input[r*width+c];
                     }
                 }
             }
 
-            output[i*width+j] = p;
+            output[row*width+col] = p;
             
         }
     }
 
+
     time.stop_time(p.runtime);
-    long N = 2*width*height*k_dim*k_dim;
+    long N = 2*width*height*filter_dim*filter_dim;
     p.throughput = N / (p.runtime*1000000.0f);
 
 }
@@ -77,13 +74,14 @@ void cuda_convolution(image_t input, image_t kernel, image_t output, dim_t& widt
     cudaMemcpyToSymbol(filter_dim, &k_dim, sizeof(dim_t));
     cudaMemcpyToSymbol(filter, kernel, k_size);
 
+    // copy filter in device memory for some reason
     image_t dev_filter;
     cudaMalloc( (void**)&dev_filter, k_size );
     cudaMemcpy( dev_filter, kernel, k_size , cudaMemcpyHostToDevice);
 
+    //something about texture memory
     cudaChannelFormatDesc desc = cudaCreateChannelDesc<pixel_t>();
     cudaBindTexture2D( nullptr, tex_input, input, desc, width, height, sizeof(pixel_t) * width );
-    
     cudaBindTexture( nullptr, tex_filter, dev_filter, k_size );
 
     //figure out block dimensions
@@ -125,6 +123,8 @@ void cuda_convolution(image_t input, image_t kernel, image_t output, dim_t& widt
 
 }
 
+
+
 /**
 * 2d convolution with global memory and constant memory
 */
@@ -139,8 +139,6 @@ __global__ void cuda_convolution_gc(image_t input, image_t output, dim_t width, 
 
     if(row>=height && col>=width) return;
 
-	if(bx==0 && by==0 && tx==0 && ty==0)
-		printf("Hello Leo\n");
     pixel_t p = 0;
     for(int i=0;i<filter_dim; i++){
         for(int j =0; j<filter_dim; j++){
@@ -154,6 +152,7 @@ __global__ void cuda_convolution_gc(image_t input, image_t output, dim_t width, 
     }
 
     output[row*width+col] = p;
+
 }
 
 /**

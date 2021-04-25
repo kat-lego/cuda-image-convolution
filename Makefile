@@ -7,7 +7,7 @@ convolution: main.o utils.o convolution.o
 main.o: src/main.cu
 	$(CC) $(CFLAGS) -c src/main.cu
 
-utils.o: utils.cu
+utils.o: src/utils.cu
 	$(CC) $(CFLAGS) -c src/utils.cu
 
 convolution.o: src/convolution.cu

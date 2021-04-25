@@ -4,7 +4,7 @@
 #include "helper_functions.h"
 #include "helper_cuda.h"   
 
-#define OUTDIR "../output/"
+#define OUTDIR "output/"
 
 void imread(std::string filename, image_t* image, dim_t& width, dim_t& height){
 
@@ -27,6 +27,7 @@ void imsave(std::string filename, image_t image, dim_t& width, dim_t& height){
     sdkSavePGM(filename.c_str(), image, width, height);
     // printf("Wrote '%s'\n", filename.c_str());
 }
+
 
 void averaging_filter(image_t kernel, dim_t& dim){
     int size = dim*dim;

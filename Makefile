@@ -14,4 +14,4 @@ convolution.o: src/convolution.cu
 	$(CC) $(CFLAGS) -c src/convolution.cu
 
 clean:
-	rm convolution *.o ../output/* ../resfiles/*
+	rm convolution *.o output/*

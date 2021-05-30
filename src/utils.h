@@ -4,30 +4,48 @@
 #include <cuda_runtime.h>
 #include <string>
 
-// Just renamed the datatypes for no reason at all.
-typedef float pixel_t;
-typedef pixel_t* image_t;
-typedef unsigned int dim_t;
+/////////////////
+// Image Class //
+///////////////// 
+class Image{
+    public:
+        float* data = nullptr;
+        unsigned int width, height;
+        
+        Image(std::string filename);
+        Image(float* data, unsigned int w, unsigned int h);
+        ~Image();
+        void print();
+        void save(std::string outputfilename);
+        bool equals(Image* img);
+        size_t get_size();
 
-void imread(std::string filename, image_t* image, dim_t& width, dim_t& height);
-void imsave(std::string filename, image_t image, dim_t& width, dim_t& height);
+        static Image* averaging_filter(unsigned int dim);
 
-/**
-* Generates a kernel of dimention @param:dim and stores in in @param:kernel
-*/
-void averaging_filter(image_t kernel, dim_t& dim);
+};
 
-struct cudaTime_t{
+struct cudaTime_t
+{
     cudaEvent_t start, stop;
     void start_time();
     void stop_time(float& time);
 };
 
-struct performance_t {
+struct performance_t
+{
     float runtime;
     float throughput;
     float bandwidth;
     void clear();
 };
+
+enum MemType
+{
+    GlobalMemory,
+    SharedMemory,
+    TextureMemory
+};
+
+std::string get_string_from_enum(MemType t);
 
 #endif

@@ -9,29 +9,31 @@
 #define TILE_WIDTH 32
 #define MAX_SM 52*52
 
-__constant__ pixel_t filter[MAX_FILTER_WIDTH*MAX_FILTER_WIDTH];
-__constant__ dim_t filter_dim;
+__constant__ float const_filter[MAX_FILTER_WIDTH*MAX_FILTER_WIDTH];
+__constant__ unsigned int const_filter_dim;
 
-texture<pixel_t, 2, cudaReadModeElementType>tex_input;
-texture<pixel_t>tex_filter;
+__global__ void cuda_convolution_globalmem_kernel(float* input, float* output, unsigned int width, unsigned int height);
+__global__ void cuda_convolution_sharedmem_kernel(float* input, float* output, unsigned int width, unsigned int height);
+__global__ void cuda_convolution_texturemem_kernel(float* output, unsigned int width, unsigned int height);
 
-__global__ void cuda_convolution_gc(image_t input, image_t output, dim_t width, dim_t height);
-__global__ void cuda_convolution_sc(image_t input, image_t output, dim_t width, dim_t height);
-__global__ void cuda_convolution_sc2(image_t input, image_t output, dim_t width, dim_t height);
-__global__ void cuda_convolution_tc(image_t output, dim_t width, dim_t height);
+texture<float, 2, cudaReadModeElementType>tex_image;
 
-
-/**
-* a serial implementation of 2d convolution
-*/
-void serial_convolution(image_t input, image_t filter, image_t output, dim_t& width, dim_t& height, dim_t& filter_dim, performance_t& p){
-    cudaTime_t time;
-    time.start_time();
+///////////////////////////////////////////////
+// A Serial Implementation of 2d convolution //
+///////////////////////////////////////////////
+Image* serial_convolution(Image* input_image, Image* filter)
+{
+    cudaTime_t timer;
+    timer.start_time();
     
-    for(int row=0; row<height; row++){
-        for(int col=0; col<width; col++){
+    int filter_dim = filter->width;
+
+    float* output_data = new float[input_image->width*input_image->height];
+
+    for(int row=0; row<input_image->height; row++){
+        for(int col=0; col<input_image->width; col++){
                     
-            pixel_t p = 0;
+            float p = 0;
             int r,c, r1, c1;
 
             for(int i=0;i<filter_dim; i++){
@@ -39,96 +41,119 @@ void serial_convolution(image_t input, image_t filter, image_t output, dim_t& wi
         
                     r = row+i-filter_dim/2; c = col+j-filter_dim/2;
                     r1 = filter_dim-i-1; c1 = filter_dim-j-1;
-                    if(r>=0 && r<height && c>=0 && c<width){
-                        p += filter[r1*filter_dim+c1]*input[r*width+c];
+                    if(r>=0 && r<input_image->height && c>=0 && c<input_image->width){
+                        p += filter->data[r1*filter_dim+c1]*input_image->data[r*input_image->width+c];
                     }
                 }
             }
 
-            output[row*width+col] = p;
+            output_data[row*input_image->width+col] = p;
             
         }
     }
 
+    float time;
+    timer.stop_time(time);
 
-    time.stop_time(p.runtime);
-    long N = 2*width*height*filter_dim*filter_dim;
-    p.throughput = N / (p.runtime*1000000.0f);
+    printf("Serial Convolution finished running after %f ms\n", time);
 
+    return new Image(output_data, input_image->width, input_image->height);
 }
 
-void cuda_convolution(image_t input, image_t kernel, image_t output, dim_t& width, dim_t& height, dim_t& k_dim, int version, performance_t& p){
-    
+//////////////////////
+// Cuda Entry point //
+//////////////////////
+Image* cuda_convolution(Image* input_image, Image* filter, MemType memtype)
+{
     //allocate device memory
-    image_t dev_input, dev_output;
+    float* dev_input; float* dev_output;
 
-    size_t size = width*height*sizeof(dim_t);
-    cudaMalloc( (void**)&dev_input,  size );
-    cudaMalloc( (void**)&dev_output, size );
+    size_t size = input_image->get_size();
+    checkCudaErrors( cudaMalloc( (void**)&dev_input,  size ) );
+    checkCudaErrors( cudaMalloc( (void**)&dev_output, size ) );
 
-    cudaMemcpy( dev_input, input, size , cudaMemcpyHostToDevice);
+    checkCudaErrors
+    ( 
+        cudaMemcpy( dev_input, input_image->data, size , cudaMemcpyHostToDevice)
+    );
+    
+    // fill in the filter on constant memory
+    checkCudaErrors
+    ( 
+        cudaMemcpyToSymbol(const_filter_dim, &filter->width, sizeof(unsigned int))
+    );
+    checkCudaErrors
+    (
+        cudaMemcpyToSymbol(const_filter, filter->data, filter->get_size())
+    );
 
-    //fill in the filter on constant memory
-    size_t k_size = k_dim*k_dim*sizeof(pixel_t);
+    //preparing for texture memory
+    if(memtype == TextureMemory)
+    {
+        cudaChannelFormatDesc channelDesc =
+            cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
+        
+        // Set texture parameters
+        tex_image.addressMode[0] = cudaAddressModeWrap;
+        tex_image.addressMode[1] = cudaAddressModeWrap;
+        tex_image.filterMode = cudaFilterModeLinear;
+        tex_image.normalized = false;
 
-    cudaMemcpyToSymbol(filter_dim, &k_dim, sizeof(dim_t));
-    cudaMemcpyToSymbol(filter, kernel, k_size);
+        // Bind the array to the texture
+        cudaChannelFormatDesc desc = cudaCreateChannelDesc<float>();
+        checkCudaErrors(
+            cudaBindTexture2D( nullptr, tex_image, dev_input, desc, input_image->width, input_image->height, sizeof(float) * input_image->width )
+        );
 
-    // copy filter in device memory for some reason
-    image_t dev_filter;
-    cudaMalloc( (void**)&dev_filter, k_size );
-    cudaMemcpy( dev_filter, kernel, k_size , cudaMemcpyHostToDevice);
+    }
 
-    //something about texture memory
-    cudaChannelFormatDesc desc = cudaCreateChannelDesc<pixel_t>();
-    cudaBindTexture2D( nullptr, tex_input, input, desc, width, height, sizeof(pixel_t) * width );
-    cudaBindTexture( nullptr, tex_filter, dev_filter, k_size );
-
-    //figure out block dimensions
-    int bw = (width+TILE_WIDTH-1)/TILE_WIDTH;
-    int hw = (height+TILE_WIDTH-1)/TILE_WIDTH;
+    // figure out block dimensions
+    int bw = (input_image->width+TILE_WIDTH-1)/TILE_WIDTH;
+    int hw = (input_image->height+TILE_WIDTH-1)/TILE_WIDTH;
 
     dim3 grid_d(bw, hw);
     dim3 block_d(TILE_WIDTH, TILE_WIDTH);
 
-    cudaTime_t time;
-    time.start_time();
+    cudaTime_t timer;float time;
+    timer.start_time();
 
     //call the appropriate kernel
-    switch(version){
-        case 1:
-            cuda_convolution_gc<<<grid_d, block_d>>>(dev_input, dev_output, width, height);
+    switch(memtype){
+        case GlobalMemory:
+            cuda_convolution_globalmem_kernel<<<grid_d, block_d>>>
+                (dev_input, dev_output, input_image->width, input_image->height);
             break;
-        case 2:
-            cuda_convolution_sc<<<grid_d, block_d>>>(dev_input, dev_output, width, height);
+        case SharedMemory:
+            cuda_convolution_sharedmem_kernel<<<grid_d, block_d>>>
+                (dev_input, dev_output, input_image->width, input_image->height);
             break;
-        case 3:
-            cuda_convolution_tc<<<grid_d, block_d>>>(dev_output, width, height);
+        case TextureMemory:
+            cuda_convolution_texturemem_kernel<<<grid_d, block_d>>>
+                (dev_output, input_image->width, input_image->height);
             break;
     }
-
-    time.stop_time(p.runtime);
-    long N = 2*width*height*k_dim*k_dim;
-    p.throughput = N / (p.runtime*1000000.0f);
+    
+    timer.stop_time(time);
 
     // copy output image back to host
-    cudaMemcpy( output, dev_output, size, cudaMemcpyDeviceToHost);
+    float* output_data = new float[input_image->width*input_image->height];
+    checkCudaErrors( cudaMemcpy( output_data, dev_output, size, cudaMemcpyDeviceToHost) );
     
-    //free memory
-    cudaFree(dev_input);
-    cudaFree(dev_output);
-    
-    cudaUnbindTexture( tex_input );
-    cudaUnbindTexture( tex_filter );
+    checkCudaErrors( cudaFree(dev_input) );
+    checkCudaErrors( cudaFree(dev_output) );
 
+    checkCudaErrors( cudaUnbindTexture( tex_image ) );
+    
+    printf("Cuda Convolution with %s finished running after %f ms\n", get_string_from_enum(memtype).c_str(),time);
+
+    return new Image(output_data, input_image->width, input_image->height);
 }
 
-
-
-/**
-* 2d convolution with global memory and constant memory
-*/
-__global__ void cuda_convolution_gc(image_t input, image_t output, dim_t width, dim_t height){
+///////////////////////////////////////////////////////////
+// 2d convolution with global memory and constant memory //
+///////////////////////////////////////////////////////////
+__global__ void cuda_convolution_globalmem_kernel(float* input, float* output, unsigned int width, unsigned int height)
+{
     int bx = blockIdx.x; int by = blockIdx.y;
     int tx = threadIdx.x; int ty = threadIdx.y;
 
@@ -139,14 +164,14 @@ __global__ void cuda_convolution_gc(image_t input, image_t output, dim_t width, 
 
     if(row>=height && col>=width) return;
 
-    pixel_t p = 0;
-    for(int i=0;i<filter_dim; i++){
-        for(int j =0; j<filter_dim; j++){
+    float p = 0;
+    for(int i=0;i<const_filter_dim; i++){
+        for(int j =0; j<const_filter_dim; j++){
 
-            r = row+i-filter_dim/2; c = col+j-filter_dim/2;
-            r1 = filter_dim-i-1; c1 = filter_dim-j-1;
+            r = row+i-const_filter_dim/2; c = col+j-const_filter_dim/2;
+            r1 = const_filter_dim-i-1; c1 = const_filter_dim-j-1;
             if(r>=0 && r<height && c>=0 && c<width){
-                p += filter[r1*filter_dim+c1]*input[r*width+c];
+                p += const_filter[r1*const_filter_dim+c1]*input[r*width+c];
             }
         }
     }
@@ -155,59 +180,13 @@ __global__ void cuda_convolution_gc(image_t input, image_t output, dim_t width, 
 
 }
 
-/**
-* 2d convolution with shared memory and constant memory (just loading in the inner pixels)
-*/
-__global__ void cuda_convolution_sc2(image_t input, image_t output, dim_t width, dim_t height){
-    __shared__ pixel_t ds[TILE_WIDTH][TILE_WIDTH];
-    int ds_width = TILE_WIDTH;
-    
-    int bx = blockIdx.x ; int by = blockIdx.y ;
-    int tx = threadIdx.x; int ty = threadIdx.y;
-    
-    int row = by * TILE_WIDTH + ty;
-    int col = bx * TILE_WIDTH + tx;
-    
-    if(row>=height && col>=width) return;
-
-    ds[ty][tx] = input[row*width+col];
-
-    __syncthreads();
-    
-    int r,c;
-    int r1, c1;
-    int rad = filter_dim/2;
-    pixel_t p = 0;
-
-    for(int i=0;i<filter_dim; i++){
-        for(int j =0; j<filter_dim; j++){
-
-            r1 = filter_dim-i-1; c1 = filter_dim-j-1;
-            r = ty+i-rad; c = tx+j-rad;
-            
-            if(r>=0 && r<ds_width && c>=0 && c<ds_width){
-                p+=filter[r1*filter_dim+c1]*ds[r][c];
-            }else{
-                r = row+i-rad; c = col+j-rad;
-                if(r>=0 && r<height && c>=0 && c<width){
-                    p += filter[r1*filter_dim+c1]*input[r*width+c];
-                }
-            }
-        }
-        
-    }
-    
-    output[row*width+col] = p;
-
-}
-
-
-/**
-* 2d convolution with shared memory and constant memory (loading in the inner pixels and halo)
-*/
-__global__ void cuda_convolution_sc(image_t input, image_t output, dim_t width, dim_t height){
-    __shared__ pixel_t ds[MAX_SM];
-    int ds_width = TILE_WIDTH+filter_dim-1;
+///////////////////////////////////////////////////////////
+// 2d convolution with shared memory and constant memory //
+///////////////////////////////////////////////////////////
+__global__ void cuda_convolution_sharedmem_kernel(float* input, float* output, unsigned int width, unsigned int height)
+{
+    __shared__ float ds[MAX_SM];
+    int ds_width = TILE_WIDTH+const_filter_dim-1;
 
     int bx = blockIdx.x ; int by = blockIdx.y ;
     int tx = threadIdx.x; int ty = threadIdx.y;
@@ -217,7 +196,7 @@ __global__ void cuda_convolution_sc(image_t input, image_t output, dim_t width, 
     
     if(row>=height && col>=width) return;
     
-    int rad = filter_dim/2;
+    int rad = const_filter_dim/2;
     int r = by*TILE_WIDTH - rad; int c = bx*TILE_WIDTH - rad;
     int r1,c1;
 
@@ -233,15 +212,15 @@ __global__ void cuda_convolution_sc(image_t input, image_t output, dim_t width, 
     }
     __syncthreads();
 
-    pixel_t p = 0;
+    float p = 0;
 
-    for(int i=0;i<filter_dim; i++){
-        for(int j =0; j<filter_dim; j++){
-            r1 = filter_dim-i-1; c1 = filter_dim-j-1;
+    for(int i=0;i<const_filter_dim; i++){
+        for(int j =0; j<const_filter_dim; j++){
+            r1 = const_filter_dim-i-1; c1 = const_filter_dim-j-1;
             r = ty+i; c = tx+j;
             
             if(ds[r*ds_width+c]!=-1){
-                p+=filter[r1*filter_dim+c1]*ds[r*ds_width+c];
+                p+=const_filter[r1*const_filter_dim+c1]*ds[r*ds_width+c];
             }
         }
     }
@@ -250,33 +229,35 @@ __global__ void cuda_convolution_sc(image_t input, image_t output, dim_t width, 
 
 }
 
-
-/**
-* 2d convolution with texture memory
-*/
-__global__ void cuda_convolution_tc(image_t output, dim_t width, dim_t height){
+////////////////////////////////////////
+// 2d convolution with texture memory //
+////////////////////////////////////////
+__global__ void cuda_convolution_texturemem_kernel(float* output, unsigned int width, unsigned int height)
+{
     int bx = blockIdx.x ; int by = blockIdx.y ;
     int tx = threadIdx.x; int ty = threadIdx.y;
     
     int row = by * TILE_WIDTH + ty;
     int col = bx * TILE_WIDTH + tx;
 
-    int r,c,r1,c1;
 
     if(row>=height && col>=width) return;
+    int r,c,r1,c1;
 
-    pixel_t p = 0;
-    for(int i=0;i<filter_dim; i++){
-        for(int j =0; j<filter_dim; j++){
+    float p = 0;
+    for(int i=0;i<const_filter_dim; i++)
+    {
+        for(int j =0; j<const_filter_dim; j++)
+        {
 
-            r = row+i-filter_dim/2; c = col+j-filter_dim/2;
-            r1 = filter_dim-i-1; c1 = filter_dim-j-1;
-            pixel_t v = tex2D(tex_input, c, r);
-            if(v != 0){
-                p += tex1Dfetch(tex_filter, r1*filter_dim+c1 )*v;
+            r = row+i-const_filter_dim/2; c = col+j-const_filter_dim/2;
+            r1 = const_filter_dim-i-1; c1 = const_filter_dim-j-1;
+            float v = tex2D(tex_image, c, r);
+            if(r>=0 && r<height && c>=0 && c<width){
+                p += const_filter[r1*const_filter_dim+c1]*v;
             }
         }
     }
-
+    
     output[row*width+col] = p;
 }

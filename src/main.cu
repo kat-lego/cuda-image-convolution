@@ -20,60 +20,31 @@ static string image_files[] = {
     "input_images/man1024p.pgm"
 };
 
-bool check(image_t img1, image_t img2, int w, int h){
-    bool res = true;
-
-    for(int i=0;i<w;i++)
-        for(int j=0;j<h;j++)
-            if( abs(img1[i*w+j] - img2[i*w+j])>0.0001 )
-                res = false;
-
-    return res;
-}
-
 
 int main( int argc, char **argv ) {
 
-    //Setup
-    performance_t cuda_p,serial_p;
-    cuda_p.clear();serial_p.clear();
+    Image image(image_files[3]);
+    Image* filter = Image::averaging_filter(7);
 
-    image_t input, output1, output2, filter;
-    input = nullptr;
-    
-    dim_t width, height;
+    Image* output_serial = serial_convolution(&image, filter);
+    output_serial->save("serial");
 
-    imread(image_files[3], &input, width, height);
-    output1 = new pixel_t[width*height];
-    output2 = new pixel_t[width*height];
+    Image* output_cuda_g = cuda_convolution(&image, filter, GlobalMemory);
+    output_cuda_g->save("cuda_global");
+    printf("Cuda G Check: %d\n", output_serial->equals(output_cuda_g));
 
-    dim_t dim = 21;
-    filter = new pixel_t[dim*dim];
-    averaging_filter(filter, dim);
+    Image* output_cuda_s = cuda_convolution(&image, filter, SharedMemory);
+    output_cuda_s->save("cuda_shared");
+    printf("Cuda S Check: %d\n", output_serial->equals(output_cuda_s));
 
+    Image* output_cuda_t = cuda_convolution(&image, filter, TextureMemory);
+    output_cuda_t->save("cuda_texture");
+    printf("Cuda T Check: %d\n", output_serial->equals(output_cuda_t));
 
-    //Act
-    serial_convolution(input, filter, output1, width, height, dim, serial_p);
-    imsave("serial", output1, width, height);
-    cout<< "Runtime: "<< serial_p.runtime << ", Throughput: "<< serial_p.throughput<<endl;
-    
-    cuda_convolution(input, filter, output2, width, height, dim, 1, cuda_p);
-    imsave("cuda-global-memory", output2, width, height);
-    cout<< "Runtime: "<< cuda_p.runtime << ", Throughput: "<< cuda_p.throughput<<", Check: "<<check(output1, output2, width,height)<<endl;
-
-    cuda_convolution(input, filter, output2, width, height, dim, 2, cuda_p);
-    imsave("cuda-shared-memory", output2, width, height);
-    cout<< "Runtime: "<< cuda_p.runtime << ", Throughput: "<< cuda_p.throughput<<", Check: "<<check(output1, output2, width,height)<<endl;
-
-    cuda_convolution(input, filter, output2, width, height, dim, 3, cuda_p);
-    imsave("cuda-texured-memory", output2, width, height);
-    cout<< "Runtime: "<< cuda_p.runtime << ", Throughput: "<< cuda_p.throughput<<", Check: "<<check(output1, output2, width,height)<<endl;
-
-    //Tear down
-    free(input);
-    free(output1);
-    free(output2);
-    free(filter);
-
+    delete filter;
+    delete output_serial;
+    delete output_cuda_g;
+    delete output_cuda_s;
+    delete output_cuda_t;
     return 0;
 }
